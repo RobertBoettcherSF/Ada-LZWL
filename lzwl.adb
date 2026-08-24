@@ -1,23 +1,13 @@
+-- lzwl.adb
 with Ada.Containers.Indefinite_Ordered_Maps;
 with Ada.Containers.Indefinite_Vectors;
+with Ada.Containers.Indefinite_Holders;
 
 package body LZWL is
 
    -- A phrase is a sequence of syllables. Used as the Dictionary Key.
    type Phrase is array (Positive range <>) of Unbounded_String;
    
-   -- Equality operator for Phrase arrays
-   function "=" (L, R : Phrase) return Boolean is
-   begin
-      if L'Length /= R'Length then return False; end if;
-      for I in 0 .. L'Length - 1 loop
-         if L(L'First + I) /= R(R'First + I) then
-            return False;
-         end if;
-      end loop;
-      return True;
-   end "=";
-
    -- Less-than operator to allow usage in Ordered_Maps
    function "<" (L, R : Phrase) return Boolean is
    begin
@@ -31,18 +21,7 @@ package body LZWL is
       return L'Length < R'Length;
    end "<";
    
-   -- Concatenation for Phrase arrays
-   function "&" (L, R : Phrase) return Phrase is
-      Result : Phrase (1 .. L'Length + R'Length);
-   begin
-      if L'Length > 0 then
-         Result(1 .. L'Length) := L;
-      end if;
-      if R'Length > 0 then
-         Result(L'Length + 1 .. Result'Last) := R;
-      end if;
-      return Result;
-   end "&";
+   -- Native Array Equality ("=") and Concatenation ("&") implicitly handle Phrase arrays safely
 
    package Phrase_Maps is new Ada.Containers.Indefinite_Ordered_Maps
      (Key_Type     => Phrase,
@@ -51,7 +30,11 @@ package body LZWL is
    package Code_Vectors is new Ada.Containers.Indefinite_Vectors
      (Index_Type   => Natural,
       Element_Type => Phrase);
-      
+
+   package Phrase_Holders is new Ada.Containers.Indefinite_Holders (Element_Type => Phrase);
+   
+   Empty_Phrase : constant Phrase(1..0) := (others => Null_Unbounded_String);
+
    -- =========================================================================
    -- Shared Helper: Initializes the dictionaries with alphabet baseline
    -- =========================================================================
@@ -102,7 +85,7 @@ package body LZWL is
       Dict_P2C   : Phrase_Maps.Map;
       Dict_C2P   : Code_Vectors.Vector;
       Next_Code  : Code;
-      S          : Phrase(1..0);
+      S          : Phrase_Holders.Holder := Phrase_Holders.To_Holder(Empty_Phrase);
       C          : Phrase(1..1);
       Out_Offset : Natural := 0;
    begin
@@ -119,31 +102,32 @@ package body LZWL is
          end if;
          
          declare
-            Combined : Phrase := S & C;
+            Current_S : Phrase := S.Element;
+            Combined  : Phrase := Current_S & C;
          begin
             if Dict_P2C.Contains(Combined) then
-               S := Combined;
+               S.Replace_Element(Combined);
             else
                if Out_Offset >= Output'Length then
                   raise LZWL_Error with "Output buffer overflow";
                end if;
-               Output(Output'First + Out_Offset) := Dict_P2C.Element(S);
+               Output(Output'First + Out_Offset) := Dict_P2C.Element(Current_S);
                Out_Offset := Out_Offset + 1;
                
                Dict_P2C.Insert(Combined, Next_Code);
                Dict_C2P.Append(Combined);
                Next_Code := Next_Code + 1;
                
-               S := C;
+               S.Replace_Element(C);
             end if;
          end;
       end loop;
       
-      if S'Length > 0 then
+      if S.Element'Length > 0 then
          if Out_Offset >= Output'Length then
             raise LZWL_Error with "Output buffer overflow";
          end if;
-         Output(Output'First + Out_Offset) := Dict_P2C.Element(S);
+         Output(Output'First + Out_Offset) := Dict_P2C.Element(S.Element);
          Out_Offset := Out_Offset + 1;
       end if;
       
@@ -159,8 +143,8 @@ package body LZWL is
       Dict_P2C   : Phrase_Maps.Map;
       Dict_C2P   : Code_Vectors.Vector;
       Next_Code  : Code;
-      Prev_S     : Phrase(1..0);
-      S1         : Phrase(1..0);
+      Prev_S     : Phrase_Holders.Holder := Phrase_Holders.To_Holder(Empty_Phrase);
+      S1         : Phrase_Holders.Holder;
       Out_Offset : Natural := 0;
    begin
       Output_Len := 0;
@@ -172,42 +156,51 @@ package body LZWL is
          declare
             K : Code := Input(I);
          begin
-            if Natural(K) >= Natural(Next_Code) then
-               if I = Input'First then
+            if I = Input'First then
+               if Natural(K) >= Natural(Next_Code) then
                   raise LZWL_Error with "Invalid data: Bad initial code";
                end if;
-               declare
-                  First_Syllable : Phrase(1..1) := (1 => Prev_S(Prev_S'First));
-                  Missing_Phrase : Phrase := Prev_S & First_Syllable;
-               begin
-                  S1 := Missing_Phrase;
-               end;
+               S1.Replace_Element(Dict_C2P.Element(Natural(K)));
             else
-               S1 := Dict_C2P.Element(Natural(K));
-            end if;
-            
-            for J in S1'Range loop
-               if S1(J) /= Null_Unbounded_String then
-                  if Out_Offset >= Output'Length then
-                     raise LZWL_Error with "Output array too small";
-                  end if;
-                  Output(Output'First + Out_Offset) := S1(J);
-                  Out_Offset := Out_Offset + 1;
+               if Natural(K) >= Natural(Next_Code) then
+                  declare
+                     Prev_Phrase    : Phrase := Prev_S.Element;
+                     First_Syllable : Phrase(1..1) := (1 => Prev_Phrase(Prev_Phrase'First));
+                  begin
+                     S1.Replace_Element(Prev_Phrase & First_Syllable);
+                  end;
+               else
+                  S1.Replace_Element(Dict_C2P.Element(Natural(K)));
                end if;
-            end loop;
-            
-            if Prev_S'Length > 0 then
-               declare
-                  First_Syllable : Phrase(1..1) := (1 => S1(S1'First));
-                  New_Phrase     : Phrase := Prev_S & First_Syllable;
-               begin
-                  Dict_P2C.Insert(New_Phrase, Next_Code);
-                  Dict_C2P.Append(New_Phrase);
-                  Next_Code := Next_Code + 1;
-               end;
             end if;
             
-            Prev_S := S1;
+            declare
+               Current_S1 : Phrase := S1.Element;
+            begin
+               for J in Current_S1'Range loop
+                  if Current_S1(J) /= Null_Unbounded_String then
+                     if Out_Offset >= Output'Length then
+                        raise LZWL_Error with "Output array too small";
+                     end if;
+                     Output(Output'First + Out_Offset) := Current_S1(J);
+                     Out_Offset := Out_Offset + 1;
+                  end if;
+               end loop;
+               
+               if Prev_S.Element'Length > 0 then
+                  declare
+                     Prev_Phrase    : Phrase := Prev_S.Element;
+                     First_Syllable : Phrase(1..1) := (1 => Current_S1(Current_S1'First));
+                     New_Phrase     : Phrase := Prev_Phrase & First_Syllable;
+                  begin
+                     Dict_P2C.Insert(New_Phrase, Next_Code);
+                     Dict_C2P.Append(New_Phrase);
+                     Next_Code := Next_Code + 1;
+                  end;
+               end if;
+            end;
+            
+            Prev_S.Replace_Element(S1.Element);
          end;
       end loop;
       
@@ -226,7 +219,7 @@ package body LZWL is
       Dict_P2C   : Phrase_Maps.Map;
       Dict_C2P   : Code_Vectors.Vector;
       Next_Code  : Code;
-      S          : Phrase(1..0);
+      S          : Phrase_Holders.Holder := Phrase_Holders.To_Holder(Empty_Phrase);
       C          : Phrase(1..1);
       Out_Offset : Natural := 0;
    begin
@@ -243,22 +236,22 @@ package body LZWL is
          end if;
          
          declare
-            Combined : Phrase := S & C;
+            Current_S : Phrase := S.Element;
+            Combined  : Phrase := Current_S & C;
          begin
             if Dict_P2C.Contains(Combined) then
-               S := Combined;
+               S.Replace_Element(Combined);
             else
                if Out_Offset >= Output'Length then
                   raise LZWL_Error with "Output buffer overflow";
                end if;
-               Output(Output'First + Out_Offset) := Dict_P2C.Element(S);
+               Output(Output'First + Out_Offset) := Dict_P2C.Element(Current_S);
                Out_Offset := Out_Offset + 1;
                
-               -- Dictionary Expansion Logic: S1 concatenated with S's initial 
-               -- syllable (where C represents the subsequent string S1).
-               if S'Length > 0 then
+               -- Dictionary Expansion Logic:
+               if Current_S'Length > 0 then
                   declare
-                     S_First    : Phrase(1..1) := (1 => S(S'First));
+                     S_First    : Phrase(1..1) := (1 => Current_S(Current_S'First));
                      New_Phrase : Phrase := C & S_First;
                   begin
                      if not Dict_P2C.Contains(New_Phrase) then
@@ -269,16 +262,16 @@ package body LZWL is
                   end;
                end if;
                
-               S := C;
+               S.Replace_Element(C);
             end if;
          end;
       end loop;
       
-      if S'Length > 0 then
+      if S.Element'Length > 0 then
          if Out_Offset >= Output'Length then
             raise LZWL_Error with "Output buffer overflow";
          end if;
-         Output(Output'First + Out_Offset) := Dict_P2C.Element(S);
+         Output(Output'First + Out_Offset) := Dict_P2C.Element(S.Element);
          Out_Offset := Out_Offset + 1;
       end if;
       
@@ -294,8 +287,8 @@ package body LZWL is
       Dict_P2C   : Phrase_Maps.Map;
       Dict_C2P   : Code_Vectors.Vector;
       Next_Code  : Code;
-      Prev_S     : Phrase(1..0);
-      S1         : Phrase(1..0);
+      Prev_S     : Phrase_Holders.Holder := Phrase_Holders.To_Holder(Empty_Phrase);
+      S1         : Phrase_Holders.Holder;
       Out_Offset : Natural := 0;
    begin
       Output_Len := 0;
@@ -307,46 +300,55 @@ package body LZWL is
          declare
             K : Code := Input(I);
          begin
-            if Natural(K) >= Natural(Next_Code) then
-               if I = Input'First then
+            if I = Input'First then
+               if Natural(K) >= Natural(Next_Code) then
                   raise LZWL_Error with "Invalid code detected";
                end if;
-               -- Expansion variant: new phrase is constructed from preceding
-               declare
-                  Prev_First     : Phrase(1..1) := (1 => Prev_S(Prev_S'First));
-                  Missing_Phrase : Phrase := Prev_First & Prev_First;
-               begin
-                  S1 := Missing_Phrase;
-               end;
+               S1.Replace_Element(Dict_C2P.Element(Natural(K)));
             else
-               S1 := Dict_C2P.Element(Natural(K));
-            end if;
-            
-            for J in S1'Range loop
-               if S1(J) /= Null_Unbounded_String then
-                  if Out_Offset >= Output'Length then
-                     raise LZWL_Error with "Output buffer overflow";
-                  end if;
-                  Output(Output'First + Out_Offset) := S1(J);
-                  Out_Offset := Out_Offset + 1;
+               if Natural(K) >= Natural(Next_Code) then
+                  -- Expansion variant: new phrase is constructed from preceding
+                  declare
+                     Prev_Phrase : Phrase := Prev_S.Element;
+                     Prev_First  : Phrase(1..1) := (1 => Prev_Phrase(Prev_Phrase'First));
+                  begin
+                     S1.Replace_Element(Prev_First & Prev_First);
+                  end;
+               else
+                  S1.Replace_Element(Dict_C2P.Element(Natural(K)));
                end if;
-            end loop;
-            
-            if Prev_S'Length > 0 then
-               declare
-                  S1_First   : Phrase(1..1) := (1 => S1(S1'First));
-                  Prev_First : Phrase(1..1) := (1 => Prev_S(Prev_S'First));
-                  New_Phrase : Phrase := S1_First & Prev_First;
-               begin
-                  if not Dict_P2C.Contains(New_Phrase) then
-                     Dict_P2C.Insert(New_Phrase, Next_Code);
-                     Dict_C2P.Append(New_Phrase);
-                     Next_Code := Next_Code + 1;
-                  end if;
-               end;
             end if;
             
-            Prev_S := S1;
+            declare
+               Current_S1 : Phrase := S1.Element;
+            begin
+               for J in Current_S1'Range loop
+                  if Current_S1(J) /= Null_Unbounded_String then
+                     if Out_Offset >= Output'Length then
+                        raise LZWL_Error with "Output buffer overflow";
+                     end if;
+                     Output(Output'First + Out_Offset) := Current_S1(J);
+                     Out_Offset := Out_Offset + 1;
+                  end if;
+               end loop;
+               
+               if Prev_S.Element'Length > 0 then
+                  declare
+                     Prev_Phrase : Phrase := Prev_S.Element;
+                     S1_First    : Phrase(1..1) := (1 => Current_S1(Current_S1'First));
+                     Prev_First  : Phrase(1..1) := (1 => Prev_Phrase(Prev_Phrase'First));
+                     New_Phrase  : Phrase := S1_First & Prev_First;
+                  begin
+                     if not Dict_P2C.Contains(New_Phrase) then
+                        Dict_P2C.Insert(New_Phrase, Next_Code);
+                        Dict_C2P.Append(New_Phrase);
+                        Next_Code := Next_Code + 1;
+                     end if;
+                  end;
+               end if;
+            end;
+            
+            Prev_S.Replace_Element(S1.Element);
          end;
       end loop;
       
